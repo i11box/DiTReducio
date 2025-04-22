@@ -13,27 +13,15 @@ from f5_tts.eval.ecapa_tdnn import ECAPA_TDNN_SMALL
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import convert_char_to_pinyin
 
-
-def load_config(config_path):
-    """加载toml配置文件"""
-    try:
-        with open(config_path, "rb") as f:
-            return tomli.load(f)
-    except Exception as e:
-        print(f"加载配置文件失败: {e}")
-        return None
-
-
 def ensure_dir(dir_path):
-    """确保目录存在，如果不存在则创建"""
+    """Ensure that the directory exists, creating it if necessary."""
     os.makedirs(dir_path, exist_ok=True)
 
 
 # librispeech test-clean metainfo: gen_utt, ref_txt, ref_wav, gen_txt, gen_wav
 def get_librispeech_test_clean_metainfo(metalst, librispeech_test_clean_path):
-    f = open(metalst)
-    lines = f.readlines()
-    f.close()
+    with open(metalst) as f:
+        lines = f.readlines()
     metainfo = []
     for line in lines:
         ref_utt, ref_dur, ref_txt, gen_utt, gen_dur, gen_txt = line.strip().split("\t")
@@ -207,7 +195,6 @@ def get_inference_prompt(
 def get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path, eval_ground_truth=False):
     f = open(metalst)
     lines = f.readlines()
-    # lines = lines[::25]
     f.close()
 
     test_set_ = []

@@ -1,30 +1,26 @@
-import os
-from pathlib import Path
 import soundfile as sf
-import tomli
 import torch
-import time
 
 from f5_tts.infer.infer_cli import infer_process, load_model, load_vocoder, DiT
-from eval.utils_eval import ensure_dir, load_config
-from cached_path import cached_path
+from eval.utils_eval import ensure_dir
+from cached_path import cached_path 
 
 def process_sentence_pair(src_info, tgt_info, model, vocoder, output_dir, speed, delta=None):
-    """处理一对句子，生成音频并保存
+    """Process a pair of sentences and generate audio
     
     Returns:
-        tuple: (推理时间(秒), 音频时长(秒))
+        tuple: (inference_time(s), audio_duration(s))
     """
     ensure_dir(output_dir)
     output_path = f"{output_dir}/{tgt_info['id']}.flac"
     
-    # 只对infer_process计时
+    # Time only the infer_process
     torch.cuda.synchronize()
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     start_event.record()
     
-    # 生成目标句子音频
+    # Generate target sentence audio
     audio,final_sample_rate, _ = infer_process(
         ref_audio=src_info['audio_path'],
         ref_text=src_info['text'],
@@ -38,41 +34,36 @@ def process_sentence_pair(src_info, tgt_info, model, vocoder, output_dir, speed,
     
     end_event.record()
     torch.cuda.synchronize()
-    infer_time = start_event.elapsed_time(end_event) / 1000.0  # 转换为秒
+    infer_time = start_event.elapsed_time(end_event) / 1000.0  # Convert to seconds
     
     with open(output_path,"wb") as f:
         sf.write(f.name, audio, final_sample_rate)
     
-    # 计算音频时长(秒)
+    # Calculate audio duration (seconds)
     audio_duration = len(audio) / final_sample_rate
     
     return infer_time, audio_duration
 
 def main():
-    config_path = 'eval/eval_config.toml'
-    
-    # 加载配置文件
-    config = load_config(config_path)
-    if config is None:
-        print("使用默认配置和命令行参数")
-        config = {
-            "paths": {
-                "lst_file": "data/LibriSpeech/librispeech_pc_test_clean_cross_sentence.lst",
-                "output_dir": "data/LibriSpeech/test-clean_output",
-                "ckpt_file": "",
-                "vocab_file": ""
-            },
-            "model": {
-                "name": "F5-TTS",
-                "vocoder_name": "vocos",
-            },
-            "generation": {
-                "speed": 1.0,
-                "delta": 0.2
-            }
+
+    config = {
+        "paths": {
+            "lst_file": "data/LibriSpeech/librispeech_pc_test_clean_cross_sentence.lst",
+            "output_dir": "data/LibriSpeech/test-clean_output",
+            "ckpt_file": "",
+            "vocab_file": ""
+        },
+        "model": {
+            "name": "F5-TTS",
+            "vocoder_name": "vocos",
+        },
+        "generation": {
+            "speed": 1.0,
+            "delta": 0.2
         }
+    }
     
-    # 命令行参数覆盖配置文件
+    # Override config with command line args
     lst_file = config["paths"]["lst_file"]
     output_dir = config["paths"]["output_dir"]
     model_name = config["model"]["name"]
@@ -82,10 +73,10 @@ def main():
     speed = config["generation"]["speed"]
     delta = config["generation"]["delta"]
 
-    # 加载vocoder
+    # Load vocoder
     vocoder = load_vocoder(vocoder_name=vocoder_name)
 
-    # 加载模型
+    # Load model
     if model_name == "F5-TTS":
         model_cls = DiT
         model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
@@ -101,32 +92,31 @@ def main():
                 ckpt_step = 1250000
                 ckpt_file = str(cached_path(f"hf://SWivid/{repo_name}/{exp_name}/model_{ckpt_step}.pt"))
     else:
-        print("只测试F5-TTS模型.")
+        print("Only testing F5-TTS model.")
         return
     
     model = load_model(model_cls, model_cfg, ckpt_file, 
                       mel_spec_type=vocoder_name, 
                       vocab_file=vocab_file)
     
-    # 读取lst文件
+    # Read lst file
     with open(lst_file, 'r', encoding='utf-8') as f:
         lines = f.readlines()
-    # lines = lines[::25]
-    # 处理每一对句子
+    # Process each sentence pair
     processed_pairs = 0
     total_audio_duration = 0.0
     total_infer_time = 0.0
     
     for i, line in enumerate(lines):
         try:
-            # 解析行
+            # Parse line
             src_id, src_dur, src_text, tgt_id, tgt_dur, tgt_text = line.strip().split('\t')
             
-            # 构建音频路径
+            # Build audio paths
             src_audio_path = f"data/LibriSpeech/test-clean/{src_id.split('-')[0]}/{src_id.split('-')[1]}/{src_id}.flac"
             tgt_audio_path = output_dir
             
-            # 准备句子信息
+            # Prepare sentence info
             src_info = {
                 'id': src_id,
                 'duration': float(src_dur),
@@ -141,12 +131,12 @@ def main():
                 'audio_path': tgt_audio_path
             }
             
-            # 处理这对句子
+            # Process this pair
             infer_time, audio_duration = process_sentence_pair(
                 src_info, tgt_info, model, vocoder, tgt_audio_path, speed,delta
             )
             
-            # 累加统计
+            # Accumulate statistics
             total_infer_time += infer_time
             total_audio_duration += audio_duration
             processed_pairs += 1
@@ -160,11 +150,11 @@ def main():
             print(error_msg)
             continue
     
-    # 打印统计信息
-    print(f'\n共处理完成{processed_pairs}对句子:')
-    print(f'总推理时间: {total_infer_time:.2f} 秒')
-    print(f'生成音频总时长: {total_audio_duration:.2f} 秒')
-    print(f'实时率 RTF: {total_infer_time/total_audio_duration:.4f}')
+    # Print statistics
+    print(f'\nProcessed {processed_pairs} sentence pairs:')
+    print(f'Total inference time: {total_infer_time:.2f} seconds')
+    print(f'Total generated audio duration: {total_audio_duration:.2f} seconds')
+    print(f'Real-time Factor (RTF): {total_infer_time/total_audio_duration:.4f}')
 
 if __name__ == "__main__":
     main()
