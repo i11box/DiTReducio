@@ -2,7 +2,7 @@
 A calibration and acceleration tool for TTS models.
 ## Supported Models
 - F5-TTS
-- - MegaTTS 3
+- MegaTTS 3
 
 ## Installation
 ```bash
