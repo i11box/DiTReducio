@@ -17,7 +17,7 @@ from tts.eval.utils_eval import (
 
 parser = argparse.ArgumentParser(
     prog="python3 infer-cli.py",
-    description="Commandline interface for E2/F5 TTS with Advanced Batch Processing.",
+    description="Commandline interface for F5 TTS with Advanced Batch Processing.",
     epilog="Specify options above to override one or more settings from config.",
 )
 parser.add_argument(

@@ -302,7 +302,7 @@ if save_chunk:
 # load vocoder
 
 if vocoder_name == "vocos":
-    vocoder_local_path = "/root/.cache/huggingface/hub/models--charactr--vocos-mel-24khz/snapshots/0feb3fdd929bcd6649e0e7c5a688cf7dd012ef21"
+    vocoder_local_path = "" # your vocos path
 elif vocoder_name == "bigvgan":
     vocoder_local_path = "../checkpoints/bigvgan_v2_24khz_100band_256x"
 

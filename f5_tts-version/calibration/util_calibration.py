@@ -3,17 +3,16 @@ import random
 import os
 import torch
 
-# 使用百分位数计算阈值
 def threshold_q(data, ratio=0.5):
     """
-    使用百分位数方法计算阈值
+    top q% threshold
     
     Args:
-        data (numpy.ndarray): 输入数据数组
-        ratio (float): 通过阈值的数的比例
+        data (numpy.ndarray):
+        ratio (float)
         
     Returns:
-        float: 计算得到的阈值
+        float: threshold value
     """
     return float(np.percentile(data, (1-ratio) * 100))
 

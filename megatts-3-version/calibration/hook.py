@@ -377,7 +377,7 @@ def speedup(model,delta = None, steps=32):
     print("Speedup for transformer!!!")
     transformer = model.dit.encoder # model should be megatts3infer/diffusion.encoder
     # Load methods
-    path = f"/root/MegaTTS3/data/methods/{steps}_{delta}.json"
+    path = f"data/methods/{steps}_{delta}.json"
     calibration_preparation(transformer, steps=steps, method_path = path)
 
 
@@ -489,7 +489,6 @@ def efficient_ff_forward(self, x):
         if self.need_cache_output[self.step]:
             self.cached_output = out
         self.step += 1
-        torch.save(out, f"/root/autodl-tmp/mega_data/ff_data/{self.id}_{self.step}.pt")
         return out
     else:
         raise NotImplementedError

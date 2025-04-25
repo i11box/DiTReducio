@@ -16,6 +16,8 @@ git clone https://github.com/i11box/TriCAL.git # clone the repository
   
   For MegaTTS 3, place the corresponding version files in the `tts` folder of MegaTTS 3 model.
 
+> Note: The paths in code should be adjusted according to your environment.
+
 ## Usage
 Launch
 ```bash
