@@ -1,9 +1,25 @@
+# Copyright 2025 ByteDance and/or its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 import os
 import argparse
+import sys
 import librosa
 import numpy as np
 import torch
+import math
 
 from tn.chinese.normalizer import Normalizer as ZhNormalizer
 from tn.english.normalizer import Normalizer as EnNormalizer
@@ -295,8 +311,12 @@ if __name__ == '__main__':
     seed_everything(seed) # TODO: only for experiment
     wav_path, input_text, out_path, time_step, p_w, t_w, delta, calibration_mode = args.input_wav, args.input_text, args.output_dir, args.time_step, args.p_w, args.t_w, args.delta, args.calibration_mode
 
+    delta = None if delta == 0 else delta
+    input_text = "巅峰产生虚伪的拥护,黄昏见证真正的信徒."
+    # input_text = "I survived being swallowed by the dark heart of the universe, so you lot seem a wee bit... quaint to me."
+
     infer_ins = MegaTTS3DiTInfer()
-    # For ablation experiments
+    # for ablation
     nots, nobs, nopre = args.nots, args.nobs, args.nopre
     if nots:
         nopre = True
@@ -305,18 +325,15 @@ if __name__ == '__main__':
     infer_ins.dit.encoder.nopre = nopre
     print(f"not use ts: {nots}, not use obs: {nobs}, not use precheck: {nopre}")
     
-    # Read input wav file
     with open(wav_path, 'rb') as file:
         file_content = file.read()
 
     print(f"[fast_cli - main]:Wav Path:{wav_path}\n Input Text:{input_text}")
     resource_context = infer_ins.preprocess(file_content)
     
-    # In calibration mode
-    seed_everything(42) # TODO: Remove in production
     calibrate_hook = None
     if calibration_mode:
-        # Check Phase
+        # Pre-calibration
         pre_hooks = pre_calibration_check(infer_ins)
         # First run
         _ = infer_ins.forward(resource_context, input_text, time_step=time_step, p_w=p_w, t_w=t_w)
@@ -327,16 +344,15 @@ if __name__ == '__main__':
         # Collect similarities for each timestep and block
         similarities = []
         for blocki in range(len(infer_ins.dit.encoder.layers)):
-            attn= infer_ins.dit.encoder.layers[blocki].attention
+            attn = infer_ins.dit.encoder.layers[blocki].attention
             similarities_list_i = list(attn.diagonal_similarities.values())
             similarities.extend(similarities_list_i)
         
         similarities = torch.tensor(similarities, device='cpu').numpy()
-        torch.save(similarities, 'similarities.pt')
         
         # Set threshold
-        # if no-pre, set threshold to a value greater than 1.0.
         threshold = threshold_q(similarities, ratio=0.1) if not nopre else 1.2
+        
         print(f"[fast_cli - main] Pre Calibration Percentile Threshold: {threshold}")
         
         ts_first_cnt = 0
@@ -344,29 +360,30 @@ if __name__ == '__main__':
         for blocki in range(len(infer_ins.dit.encoder.layers)):
             attn = infer_ins.dit.encoder.layers[blocki].attention
             attn.ts_first = {}
-            # Check similarities for each timestep
+            # Traverse similarities for all timesteps of this block
             for step, similarity in attn.diagonal_similarities.items():
                 attn.ts_first[step] = False
                 if similarity >= threshold:
                     attn.ts_first[step] = True
                     ts_first_cnt += 1
-            # Clean up similarity dict to free memory
+            # Clear similarity dict to free memory
             del attn.diagonal_similarities
         
         print(f"TS First Count: {ts_first_cnt}")
         
         # Start pre-calibration
         pre_calibrate_hook = pre_calibration(infer_ins, steps=time_step, threshold=delta)
+        # Pre-calibrate
         _ = infer_ins.forward(resource_context, input_text, time_step=time_step, p_w=p_w, t_w=t_w)
         pre_calibrate_hook.remove()
-        # Call calibrate method in calibration mode
+        # If in calibration mode, call calibrate method
         calibrate_hook = calibration(infer_ins, steps=time_step, threshold=delta)
     elif calibration_mode is False and delta is not None:
         speedup(infer_ins, steps = time_step, delta=delta)
     else:
         calibration_preparation(infer_ins.dit.encoder, steps = time_step)
 
-    # Count TS methods
+    # Count TS occurrences
     ts_cnt = 0
     for blocki, block in enumerate(infer_ins.dit.encoder.layers):
         for method in block.attention.steps_method:
@@ -375,18 +392,13 @@ if __name__ == '__main__':
     
     print(f"TS Count: {ts_cnt}")
     
-    # Compute statistics hooks
+    # Hooks for calculation
     hooks = []
     if calibrate_hook is not None:
         hooks.append(calibrate_hook)
 
-    # Generate audio
     wav_bytes = infer_ins.forward(resource_context, input_text, time_step=time_step, p_w=p_w, t_w=t_w)
 
-    total_full_ops,total_efficient_ops = 0,0
-    total_full_ops_ff,total_efficient_ops_ff = 0,0
-    
-    # Remove hooks
     for hook in hooks:
         hook.remove()
 
@@ -398,10 +410,12 @@ if __name__ == '__main__':
         for blocki, block in enumerate(transformer.layers):
             to_save_methods['methods'].append(block.attention.steps_method)
         
-        with open(f"/root/MegaTTS3/data/methods/{time_step}_{delta}.json", 'w') as file:
+        methods_path = "" # your path, e.g. "data/methods/{time_step}_{delta}.json"
+        with open(methods_path, 'w') as file:
             import json
             file.write(json.dumps(to_save_methods))
-        
+    
+    sys.stdout = sys.__stdout__
     print(f"| Saving results to {out_path}/[P]{input_text[:20]}.wav")
     os.makedirs(out_path, exist_ok=True)
-    save_wav(wav_bytes, f'{out_path}/[P]{input_text[:20]}.wav')
+    save_wav(wav_bytes, f'{out_path}/out_{delta}.wav')

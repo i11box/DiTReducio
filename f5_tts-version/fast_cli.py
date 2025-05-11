@@ -239,9 +239,6 @@ gen_text = args.gen_text or config.get("gen_text", "Here we generate something j
 gen_file = args.gen_file or config.get("gen_file", "")
 
 output_dir = args.output_dir or config.get("output_dir", "tests")
-output_file = args.output_file or config.get(
-    "output_file", f"infer_cli.wav"
-)
 
 save_chunk = args.save_chunk or config.get("save_chunk", False)
 remove_silence = args.remove_silence or config.get("remove_silence", False)
@@ -258,6 +255,10 @@ fix_duration = args.fix_duration or config.get("fix_duration", fix_duration)
 device = args.device or config.get("device", device)
 calibration_mode = args.calibration or config.get("calibration", False)
 delta = args.threshold or config.get("threshold", None)
+
+output_file = args.output_file or config.get(
+    "output_file", f"infer_cli_{delta}.wav"
+)
 
 # for ablation
 nots = args.nots or config.get("nots", False)
@@ -302,9 +303,9 @@ if save_chunk:
 # load vocoder
 
 if vocoder_name == "vocos":
-    vocoder_local_path = "" # your vocos path
+    vocoder_local_path = ""  # your path to vocos model
 elif vocoder_name == "bigvgan":
-    vocoder_local_path = "../checkpoints/bigvgan_v2_24khz_100band_256x"
+    vocoder_local_path = ""  # your path to bigvgan model
 
 vocoder = load_vocoder(
     vocoder_name=vocoder_name, is_local=True, local_path=vocoder_local_path, device=device
@@ -349,6 +350,9 @@ ema_model = load_model(
 
 def main():
     main_voice = {"ref_audio": ref_audio, "ref_text": ref_text}
+    
+    infer_time = 0.0
+    
     if "voices" not in config:
         voices = {"main": main_voice}
     else:
@@ -384,11 +388,11 @@ def main():
         gen_text_ = text.strip()
         print(f"Voice: {voice}")
         
-        #-----------calibration----------------
+        #-----------Calibration Phase----------------
         calibrate_hook = None
         if calibration_mode:
             
-            # set for ablation
+            # Set ablation parameters
             ema_model.transformer.nots = nots
             ema_model.transformer.nobs = nobs
             
@@ -540,17 +544,24 @@ def main():
                         none_cnt += 1
                 to_save_methods['methods'].append(block.attn.steps_method)
 
-            with open(f"data/methods/{nfe_step}_{delta}.json", 'w') as file:
+            with open(f"methods/{nfe_step}_{delta}.json", 'w') as file:  # your path
                 file.write(json.dumps(to_save_methods))
-                print(f"Methods saved to data/methods/{nfe_step}_{delta}.json")
+                print(f"Methods saved to methods/{nfe_step}_{delta}.json")
             print(f"delta: {delta}, TS Count: {ts_cnt}, BS Count: {bs_cnt}, None Count: {none_cnt}")     
-        #-----------accleration based saved methods or not----------------
+        #-----------Acceleration based on saved methods or not----------------
         else:
             if delta is not None:
                 speedup(ema_model, steps=nfe_step, delta=delta)
             else:
-                calibration_preparation(ema_model.transformer,steps = 32) # speedup and calibration will automatically conduct this func 
+                # Speedup and calibration will automatically conduct this function
+                calibration_preparation(ema_model.transformer, steps=32)
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
             
+
+            # for i in range(50):
             audio_segment, final_sample_rate, spectragram = infer_process(
                 ref_audio_,
                 ref_text_,
@@ -567,10 +578,13 @@ def main():
                 fix_duration=fix_duration,
                 device=device,
             )
+
+            end.record()
+            torch.cuda.synchronize()
+            infer_time += start.elapsed_time(end) / 1000.0
+
             generated_audio_segments.append(audio_segment)
             
-            
-
         if save_chunk:
             if len(gen_text_) > 200:
                 gen_text_ = gen_text_[:200] + " ... "
@@ -592,6 +606,8 @@ def main():
             if remove_silence:
                 remove_silence_for_generated_wav(f.name)
             print(f.name)
+        
+    print(f"Total Inference Time: {infer_time:.2f} seconds, delta: {delta}")
 
 
 if __name__ == "__main__":

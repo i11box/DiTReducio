@@ -3,7 +3,6 @@
 import argparse
 import sys
 import os
-import wandb
 
 sys.path.append(os.getcwd())
 
@@ -17,7 +16,7 @@ from tts.eval.utils_eval import (
 
 parser = argparse.ArgumentParser(
     prog="python3 infer-cli.py",
-    description="Commandline interface for F5 TTS with Advanced Batch Processing.",
+    description="Commandline interface for E2/F5 TTS with Advanced Batch Processing.",
     epilog="Specify options above to override one or more settings from config.",
 )
 parser.add_argument(
@@ -32,23 +31,23 @@ delta = parser.parse_args().delta
 if delta == 0:
     delta = None
 lang = "en"
-metalst = "" # your path
-librispeech_test_clean_path = ""  # test-clean path
-gen_wav_dir = ""  # generated wavs
+metalst = ""  # your path, e.g. "/path/to/LibriSpeech/librispeech_pc_test_clean_cross_sentence.lst"
+librispeech_test_clean_path = ""  # your path to test-clean directory
+gen_wav_dir = ""  # your path for generated wavs output
 gpus = [0]
 test_set = get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path)
 
-## In LibriSpeech, some speakers utilized varying voice characteristics for different characters in the book,
+## Note: In LibriSpeech, some speakers utilized varying voice characteristics for different characters in the book,
 ## leading to a low similarity for the ground truth in some cases.
 # test_set = get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path, eval_ground_truth = True)  # eval ground truth
 
 local = True
 if local:  # use local custom checkpoint dir
-    asr_ckpt_dir = "" # your local path
+    asr_ckpt_dir = ""  # your path to faster-whisper model
 else:
     asr_ckpt_dir = ""  # auto download to cache dir
 
-wavlm_ckpt_dir = "" # your path
+wavlm_ckpt_dir = ""  # your path to wavlm checkpoint
 
 # --------------------------- WER ---------------------------
 
@@ -79,6 +78,3 @@ sim = round(total_sim / len(sim_list), 3)
 print(f"\nTotal {len(sim_list)} samples")
 print(f"SIM      : {sim}")
 
-wandb.summary["wer"] = wer
-wandb.summary["sim"] = sim
-wandb.summary["delta"] = delta

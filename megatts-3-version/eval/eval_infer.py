@@ -24,7 +24,6 @@ from tts.utils.text_utils.split_text import chunk_text_chinese, chunk_text_engli
 from tts.utils.commons.hparams import hparams, set_hparams
 from tts.fast_cli import MegaTTS3DiTInfer, convert_to_wav, cut_wav
 
-import wandb
 if "TOKENIZERS_PARALLELISM" not in os.environ:
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -33,7 +32,11 @@ def ensure_dir(dir_path):
     os.makedirs(dir_path, exist_ok=True)
 
 def process_sentence_pair(src_info, tgt_info, output_dir):
-
+    """Process a pair of sentences, generate and save audio
+    
+    Returns:
+        tuple: (inference time (seconds), audio duration (seconds))
+    """
     wav_path=src_info['audio_path']
     input_text=tgt_info['text']
     audio_duration = tgt_info['duration']
@@ -69,29 +72,28 @@ def process_sentence_pair(src_info, tgt_info, output_dir):
         
     avg_full_ops = total_full_ops / len(infer_ins.dit.encoder.layers)
     avg_efficient_ops = total_efficient_ops / len(infer_ins.dit.encoder.layers)
-    # avg_full_ops_ff = total_full_ops_ff / len(infer_ins.dit.encoder.layers)
-    # avg_efficient_ops_ff = total_efficient_ops_ff / len(infer_ins.dit.encoder.layers)
     avg_attn_latency = total_attn_latency / len(infer_ins.dit.encoder.layers) * 1000
     avg_ff_latency = total_ff_latency / len(infer_ins.dit.encoder.layers) * 1000
-    
-    wandb.log({
-        "Average Attn Latency": avg_attn_latency,
-        "Average FF Latency": avg_ff_latency,
-        "Average Attn&&FF Ops percent": avg_efficient_ops / avg_full_ops,
-    })
 
     save_wav(wav_bytes, output_path)
     calibration_reset(infer_ins.dit.encoder)
 
     return audio_duration
 
+def print_memory_usage():
+    """Print current GPU memory usage in MB"""
+    allocated = torch.cuda.memory_allocated() / 1024**2
+    reserved = torch.cuda.memory_reserved() / 1024**2 
+    print(f"Allocated Memory: {allocated:.2f} MB")
+    print(f"Reserved Memory: {reserved:.2f} MB")
+
 if __name__ == '__main__':
     
     # Load config
     config = {
         "paths": {
-            "lst_file": "data/LibriSpeech/librispeech_pc_test_clean_cross_sentence.lst",
-            "output_dir": "data/LibriSpeech/test-clean_output",
+            "lst_file": "",  # your path, e.g. "data/LibriSpeech/librispeech_pc_test_clean_cross_sentence.lst"
+            "output_dir": "", # your path, e.g. "data/LibriSpeech/test-clean_output"
         }, 
         "params": {
             "time_step": 32,
@@ -110,16 +112,12 @@ if __name__ == '__main__':
         delta = None
     seed_everything(seed) # TODO: only for experiment
     
-    wandb.init(project="MegaTTS3-Evaluation-new", 
-               name=f"LibriSpeech-Test-Clean_{delta}",
-               group=f"{seed}"
-               )
-    
     lst_file = config["paths"]["lst_file"]
     output_dir = config["paths"]["output_dir"]
 
     with open(lst_file, 'r', encoding='utf-8') as f:
         lines = f.readlines()
+    lines.insert(0, lines[0])  # Use first line as warm-up
     
     processed_pairs = 0
     total_audio_duration = 0.0
@@ -137,7 +135,7 @@ if __name__ == '__main__':
         tgt_audio_path = output_dir
         
         speaker_id = src_id.split('-')[0]
-        src_audio_path = f"data/LibriSpeech/test-clean/{src_id.split('-')[0]}/{src_id.split('-')[1]}/{src_id}.flac"
+        src_audio_path = ""  # your path, e.g. "data/LibriSpeech/test-clean/{speaker_id}/{src_id.split('-')[1]}/{src_id}.flac"
         src_info = {
             'audio_path': src_audio_path
         }
@@ -160,8 +158,10 @@ if __name__ == '__main__':
         print(f"[INFO]:Processed pair {i}/{len(lines)}: {src_id} -> {tgt_id} (infer: {infer_time:.2f}s, audio: {audio_duration:.2f}s)")
     
     # Print statistics
-    total_infer_time = sum(infer_ins.infer_times)
+    total_infer_time = sum(infer_ins.dit.infer_times)
     print(f'\nProcessed {processed_pairs} pairs of sentences:')
     print(f'Total inference time: {total_infer_time:.2f} seconds')
     print(f'Total audio duration: {total_audio_duration:.2f} seconds')
     print(f'RTF: {total_infer_time/total_audio_duration:.4f}')
+    torch.cuda.empty_cache()
+    print_memory_usage()

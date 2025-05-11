@@ -17,61 +17,65 @@ if "TOKENIZERS_PARALLELISM" not in os.environ:
 
 #-------------------utils hooks-------------------
 """
-Calculate FLOPs for attention operations
+Calculate Attention FLOPs
 """
 
 def calculate_flops_hook(module, args, kwargs):
-    hidden_states = args[0]
+    # Get hidden_states from args
+    hidden_states = kwargs['x']
     batch_size, seq_len, dim = hidden_states.shape
     
     # Base operations: Q*K + Attention*V
     base_ops = seq_len * seq_len * module.n_local_heads * batch_size * dim // module.n_local_heads + seq_len * dim * batch_size * seq_len
     
-    # Record full operations
+    # Record full precision computation
     module.full_ops += base_ops
     
-    # Get current method
+    # Get current method and window size
     method = module.steps_method[module.step]
     
-    # Calculate actual operations based on method
+    # Calculate actual computation based on different methods
     if method == "BS":
         base_ops = base_ops / 3
     elif method == "TS":
         base_ops = 0
     
-    # Record efficient operations
+    # Record actual computation
     module.efficient_ops += base_ops
 
 def calculate_ff_flops_hook(module, args, kwargs):
+    # Get hidden_states from args
     hidden_states = args[0]
     batch_size, seq_len, dim = hidden_states.shape
     
+    # Get inner_dim directly from module
     inner_dim = module.w1.out_features
     
     # Base operations include:
     # 1. First Linear: dim -> inner_dim
-    # 2. SiLU activation: element-wise on inner_dim
-    # 3. Second Linear: inner_dim -> dim
+    # 2. SiLU activation: element-wise operation on inner_dim
+    # 3. Second Linear: inner_dim -> dim 
     base_ops = (
-        batch_size * seq_len * dim * inner_dim +  # First Linear 
+        batch_size * seq_len * dim * inner_dim +  # First Linear
         batch_size * seq_len * inner_dim +        # SiLU activation
         batch_size * seq_len * inner_dim * dim    # Second Linear
     )
     
+    # Record full precision computation
     module.full_ops += base_ops
         
-    # Calculate actual operations based on method
+    # Calculate actual computation based on different methods
     method = module.steps_method[module.step]
     if method == "TS":
         base_ops = 0
     elif method == "BS":
         base_ops /= 3
     
-    # Record efficient operations
+    # Record actual computation
     module.efficient_ops += base_ops
 
 """
-Calculate compression loss between raw output and efficient output using default values
+Calculate the difference between raw output and efficient output, use default values to compute Loss
 """
 def compression_loss(a, b, metrics = "l1"):
     """
@@ -93,23 +97,22 @@ def compression_loss(a, b, metrics = "l1"):
     return l
 
 def pre_calibration_hook(module, args, kwargs):
-    """Pre-calibration: Determine greedy search patterns by comparing heatmaps with diagonal at each layer and timestep"""
-    # Get current timestep
+    """Pre-calibration, determine greedy search mode by comparing the heatmap of each layer and time step with the diagonal"""
+    # Get current time step
     step = module.step
     
-    # Save weights
     x = args[0]
     start_pos = args[1] if len(args) > 1 else kwargs.get('start_pos', 0)
     
     bsz, seqlen, _ = x.shape
     
-    # Calculate query and key
+    # Compute query and key
     xq = module.wq(x)
     xk = module.wk(x)
-    # Use higher precision for matrix multiplication
+    # Use higher precision data type for matrix multiplication
     xq_64 = xq.to(torch.float64)
     xk_64 = xk.to(torch.float64)
-    # Calculate attention scores
+    # Compute attention scores
     scale = 1.0 / math.sqrt(module.head_dim)
     attn_scores = torch.matmul(xq_64, xk_64.transpose(-2, -1)) * scale
     attn_scores_stable = attn_scores - torch.max(attn_scores, dim=-1, keepdim=True)[0]
@@ -121,30 +124,30 @@ def pre_calibration_hook(module, args, kwargs):
     # Create diagonal matrix
     diagonal_matrix = torch.eye(seqlen, device=attn_weights.device, dtype=attn_weights.dtype)
     
-    # Calculate cosine similarity
+    # Compute cosine similarity
     attn_weights_cond, attn_weights_uncond = attn_weights.chunk(2, dim=0)
     batch_size = attn_weights_cond.shape[0]
     similarities = []
     
     for b in range(batch_size):
-        # Get attention weights for current batch, take first head
+        # Get attention weights for the current batch, take the first head
         attn_mat = attn_weights_cond[b]
         
-        # Flatten matrix to vector
+        # Flatten matrix into vector
         attn_vec = attn_mat.reshape(-1)
         diag_vec = diagonal_matrix.reshape(-1)
         
-        # Calculate cosine similarity
+        # Compute cosine similarity
         attn_norm = attn_vec / (torch.norm(attn_vec) + 1e-6)
         diag_norm = diag_vec / (torch.norm(diag_vec) + 1e-6)
         
         sim = torch.dot(attn_norm, diag_norm)
         similarities.append(sim.item())
     
-    # Average similarity
+    # Take average as final similarity
     similarity_ts = sum(similarities) / len(similarities)
     
-    # Save similarity
+    # Record similarity
     if not hasattr(module, 'diagonal_similarities'):
         module.diagonal_similarities = {}
     module.diagonal_similarities[step] = similarity_ts
@@ -154,7 +157,7 @@ def pre_calibration_hook(module, args, kwargs):
 
 def pre_calibration(model,steps=32, threshold=0.1):
     '''
-    Pre-calibration Phase
+    Official pre-calibration
     '''
     print("Pre Calibration for transformer!!!")
     transformer = model.dit.encoder # model should be megatts3infer/diffusion.encoder
@@ -176,11 +179,11 @@ def pre_calibration(model,steps=32, threshold=0.1):
 
 def pre_calibration_check(model):
     '''
-    Explore which blocks can prioritize TS/BS mechanisms
+    This function is mainly used to explore which blocks can prioritize using ts/bs
     '''
     print("Pre Calibration Exploring for transformer!!!")
     transformer = model.dit.encoder # model should be megatts3infer/diffusion.encoder
-    # Disable cache
+    # Turn off cache
     calibration_reset(transformer) # to set step in module
     for block in transformer.layers:
         block.attention.need_cache_output = [False] * 32 # magic num, it should be nfe_steps
@@ -199,19 +202,20 @@ def transformer_forward_pre_hook_for_pre_calibration(model, args, kwargs):
     now_stepi = model.layers[0].attention.step # model should be encoder
     print(f"Pre Calibration Step: {now_stepi}")
 
-    # Disable cache during method search to avoid modifications
+    # To avoid changing cache content when searching for candidate methods, turn off cache switches during search
     for block in model.layers:
         block.attention.forward = types.MethodType(cuda_timer(efficient_attention_forward), block.attention)
         block.attention.need_cache_output[now_stepi] = False
         block.feed_forward.need_cache_output[now_stepi] = False
     
-    # First run to get full-attention values. In pre-calibration, focus on ts_first blocks and try setting them to TS
+    # Run once to get full-attention values, in pre-calibration, only focus on ts_first blocks and try to set them to ts
     raw_outputs = model.forward(*args, **kwargs)
     raw_output_cond_spktxt,raw_output_condtxt,raw_output_uncond = raw_outputs.chunk(3,dim=0)
     raw_outputs = raw_output_uncond + 2.5 * (raw_output_cond_spktxt - raw_output_uncond) + 1.6 * (raw_output_cond_spktxt - raw_output_condtxt)
     for blocki, block in enumerate(model.layers):
         if now_stepi == 0:
             continue
+        # Methods from strong to weak
         attn = block.attention
         ff =block.feed_forward
         assert hasattr(attn, 'ts_first'), "attn.ts_first not found"
@@ -223,6 +227,7 @@ def transformer_forward_pre_hook_for_pre_calibration(model, args, kwargs):
         selected_method = 'NONE'
         for method in method_candidates:
             attn.steps_method[now_stepi] = method
+            # Modify ff method
             ff.steps_method[now_stepi] = method
 
             for block_ in model.layers:
@@ -247,28 +252,27 @@ def transformer_forward_pre_hook_for_pre_calibration(model, args, kwargs):
 
     del raw_outputs
 
-    # As this is just a transformer prehook,
-    # step will increment in the final forward pass after all mechanisms are determined
-    # so we need to restore the incremented step here
+    # Since this is just a prehook for the transformer,
+    # After finalizing all mechanisms, another transformer forward will be executed, where step will increment, so restore the incremented step here
     for block_ in model.layers:
         block_.attention.step = now_stepi
         block_.feed_forward.step = now_stepi
 
-    # Enable cache for this step after plan is determined
+    # After determining the plan for this step, turn on the cache switch so that the cache for this step can be generated normally
     for block in model.layers:
         block.attention.need_cache_output[now_stepi] = True
         block.feed_forward.need_cache_output[now_stepi] = True
 
 
 """
-Calibration function
+Calibration function, use greedy algorithm to calculate hyperparameters corresponding to each mechanism
 """
 def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
     
     now_stepi = model.layers[0].attention.step
     print(f"Calibration Step: {now_stepi}")
 
-    # Disable cache during method search to avoid modifications
+    # To avoid changing cache content when searching for candidate methods, turn off cache switches during search
     for block in model.layers:
         block.attention.forward = types.MethodType(cuda_timer(efficient_attention_forward), block.attention)
         block.attention.need_cache_output[now_stepi] = False
@@ -280,14 +284,14 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
     # Current step progress bar
     step_pbar = tqdm(
         total=total_blocks * 2,
-        desc=f"Step {now_stepi}/32",
+        desc=f"Time step {now_stepi}/32",
         position=1,
         leave=False,
         bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{postfix}]',
         postfix=f"block 0/{total_blocks} method: initializing"
     )
 
-    # First run to get full-attention values
+    # Run once to get full-attention values
     raw_outputs = model.forward(*args, **kwargs)
     raw_output_cond_spktxt,raw_output_condtxt,raw_output_uncond = raw_outputs.chunk(3,dim=0)
     raw_outputs = raw_output_uncond + 2.5 * (raw_output_cond_spktxt - raw_output_uncond) + 1.6 * (raw_output_cond_spktxt - raw_output_condtxt)
@@ -298,9 +302,10 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
     for blocki, block in enumerate(model.layers):
         if now_stepi == 0:
             continue
+        # Methods from strong to weak
         attn = block.attention
         assert hasattr(attn, 'ts_first') , "attn.ts_first not found"
-        if attn.steps_method[now_stepi] == 'TS': # Pre-calibration already checked, skip directly
+        if attn.steps_method[now_stepi] == 'TS': # Pre-calibration has already judged, so skip directly
             step_pbar.update(2)
             continue
         if not nots and not nobs:
@@ -313,6 +318,7 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         for method in method_candidates:
             step_pbar.set_postfix_str(f"block {blocki + 1}/{total_blocks} method: {method}")
             block.attention.steps_method[now_stepi] = method
+            # Modify ff method
             block.feed_forward.steps_method[now_stepi] = method
 
             for block_ in model.layers:
@@ -341,14 +347,13 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         
     del raw_outputs
 
-    # As this is just a transformer prehook,
-    # step will increment in the final forward pass after all mechanisms are determined
-    # so we need to restore the incremented step here
+    # Since this is just a prehook for the transformer,
+    # After finalizing all mechanisms, another transformer forward will be executed, where step will increment, so restore the incremented step here
     for block_ in model.layers:
         block_.attention.step = now_stepi
         block_.feed_forward.step = now_stepi
 
-    # Enable cache for this step after plan is determined
+    # After determining the plan for this step, turn on the cache switch so that the cache for this step can be generated normally
     for block in model.layers:
         block.attention.need_cache_output[now_stepi] = True
         block.feed_forward.need_cache_output[now_stepi] = True
@@ -372,33 +377,34 @@ def calibration(model, steps=32, threshold=0.1):
     transformer.loss_thresholds = loss_thresholds
     return hook # Return hook reference for removal
 
-def speedup(model,delta = None, steps=32):
+def speedup(model, delta = None, steps=32):
     assert delta is not None, "delta should be set"
     print("Speedup for transformer!!!")
     transformer = model.dit.encoder # model should be megatts3infer/diffusion.encoder
-    # Load methods
-    path = f"data/methods/{steps}_{delta}.json"
+    # Load methods 
+    path = "" # your path, e.g. "data/methods/{steps}_{delta}.json"
     calibration_preparation(transformer, steps=steps, method_path = path)
 
 
-def calibration_preparation(transformer, steps=32, method_path = None,is_method_init=True):
+def calibration_preparation(transformer, steps=32, method_path = None,is_method_init=True, no_efficient=False):
 
     if method_path is None:
         for i, block in enumerate(transformer.layers):
             attn = block.attention
             ff = block.feed_forward
-            # Set attributes for attention
+            # for attn set some attribute
             attn.id = i
             attn.step = 0
             attn.total_latency = 0.0
             attn.full_ops = 0
             attn.efficient_ops = 0
-            attn.forward = types.MethodType(cuda_timer(efficient_attention_forward), attn)
+            if not no_efficient:
+                attn.forward = types.MethodType(cuda_timer(efficient_attention_forward), attn)
             if is_method_init:
                 attn.steps_method = ['NONE'] * steps
             attn.need_cache_output = [True] * steps
             attn.cached_output = None
-            # Set attributes for feed-forward
+            # for ff set some attribute
             if is_method_init:
                 ff.steps_method = ['NONE'] * steps
             ff.need_cache_output = [True] * steps
@@ -406,7 +412,8 @@ def calibration_preparation(transformer, steps=32, method_path = None,is_method_
             ff.efficient_ops = 0
             ff.step = 0
             ff.total_latency = 0.0
-            ff.forward = types.MethodType(cuda_timer(efficient_ff_forward), ff)
+            if not no_efficient:
+                ff.forward = types.MethodType(cuda_timer(efficient_ff_forward), ff)
             ff.cached_output = None
             ff.id = i
     else:
@@ -415,7 +422,7 @@ def calibration_preparation(transformer, steps=32, method_path = None,is_method_
             saved_methods = json.loads(open(method_path).read())['methods']
 
             for i, (methods, block) in enumerate(zip(saved_methods, transformer.layers)):
-                # Set attributes for attention
+                # for attn
                 attn = block.attention
                 attn.steps_method = methods
                 attn.id = i
@@ -426,7 +433,7 @@ def calibration_preparation(transformer, steps=32, method_path = None,is_method_
                 attn.forward = types.MethodType(cuda_timer(efficient_attention_forward), attn)
                 attn.need_cache_output = [True] * steps
                 attn.cached_output = None
-                # Set attributes for feed-forward
+                # for ff
                 ff = block.feed_forward
                 ff.steps_method = methods
                 ff.id = i
@@ -438,17 +445,17 @@ def calibration_preparation(transformer, steps=32, method_path = None,is_method_
                 ff.forward = types.MethodType(cuda_timer(efficient_ff_forward), ff)
                 ff.cached_output = None
 
-# After every calibration phase, module steps should be reset
+# After each calibration phase, modules' steps should be reset
 def calibration_reset(transformer, steps=32):
     for block in transformer.layers:
         attn = block.attention
         ff = block.feed_forward
-        # Reset attributes for attention
+        # for attn set some attribute
         attn.step = 0
         attn.total_latency = 0.0
         attn.need_cache_output = [True] * steps
         attn.cached_output = None
-        # Reset attributes for feed-forward
+        # for ff set some attribute
         ff.need_cache_output = [True] * steps
         ff.step = 0
         ff.total_latency = 0.0
@@ -458,11 +465,11 @@ def eval_reset(transformer, steps=32):
     for block in transformer.layers:
         attn = block.attention
         ff = block.feed_forward
-        # Reset attributes for attention
+        # for attn set some attribute
         attn.step = 0
         attn.need_cache_output = [True] * steps
         attn.cached_output = None
-        # Reset attributes for feed-forward
+        # for ff set some attribute
         ff.need_cache_output = [True] * steps
         ff.step = 0
         ff.cached_output = None
@@ -472,22 +479,23 @@ def efficient_ff_forward(self, x):
     if 'TS' in method:
         self.step += 1
         return self.cached_output
-    elif 'BS' in method: # May need to keep first two branches
-        x,_,_ = x.chunk(3,dim=0) # Batch size might not be 3, check if error occurs
-        batch_size, _ , _ = x.shape
-        out_cond = self.w2(F.silu(self.w1(x)))
-        last_spktxt, last_txt, last_uncond = self.cached_output.chunk(3, dim = 0)
-        uncond_res = last_uncond - last_spktxt
-        txt_res = last_txt - last_spktxt
-        out = torch.cat([out_cond, out_cond + txt_res, out_cond + uncond_res], dim=0)
+    elif 'BS' in method:
+        batch_single = x.shape[0] // 3
+
+        out_cond = self.w2(F.silu(self.w1(x[:batch_single])))
+
+        full_output = self.cached_output - self.cached_output[:batch_single] + out_cond
         if self.need_cache_output[self.step]:
-            self.cached_output = out
+            self.cached_output = full_output
+            
         self.step += 1
-        return out
+        return full_output
     elif 'NONE' in method:
         out = self.w2(F.silu(self.w1(x)))
+        
         if self.need_cache_output[self.step]:
             self.cached_output = out
+        
         self.step += 1
         return out
     else:
@@ -503,58 +511,58 @@ def efficient_attention_forward(
     
     method = self.steps_method[self.step]
     batch_size, seq_len, _ = x.shape
-    # Directly share output from last step, TS mechanism
+    
+    # Whether to directly share the output of the most recent step, TS mechanism
     if 'TS' in method:
         self.step += 1
         return self.cached_output
 
-    # BS mechanism calculation
-    # If using BS mechanism, calculate only conditional cases first    
     if 'BS' in method:
-        # Exclude unconditional
-        batch_size = batch_size // 3
-        x = x[:batch_size]
+        batch_size, seq_len, _ = x.shape
+        batch_single = batch_size // 3
 
-    # `sample` projections.
-    query = self.wq(x)
-    key = self.wk(x)
-    value = self.wv(x)
+        query = self.wq(x[:batch_single])
+        key = self.wk(x[:batch_single])
+        value = self.wv(x[:batch_single])
 
-    batch_size, seq_len, _ = x.shape
-    
-    # attention
-    query = query.view(batch_size, -1, self.n_local_heads, self.head_dim)
-    key = key.view(batch_size, -1, self.n_local_kv_heads, self.head_dim)
-    value = value.view(batch_size, -1, self.n_local_kv_heads, self.head_dim)
-    query, key = apply_rotary_emb(query, key, freqs_cis=freqs_cis)
+        query = query.view(batch_single, -1, self.n_local_heads, self.head_dim)
+        key = key.view(batch_single, -1, self.n_local_kv_heads, self.head_dim)
+        value = value.view(batch_single, -1, self.n_local_kv_heads, self.head_dim)
+        query, key = apply_rotary_emb(query, key, freqs_cis=freqs_cis)
 
-    output = flash_attn_func(query, key, value, causal=False)
-
-    output = output.view(batch_size, seq_len, -1)
-    x = output.to(query.dtype)
+        x = flash_attn_func(query, key, value, causal=False)
+        x = x.view(batch_single, seq_len, -1).to(query.dtype)
+        x = self.wo(x)
         
-    # linear proj
-    x = self.wo(x)
-    
-    if 'BS' in method:
-        
-        # Use existing cache to calculate residuals
-        last_spktxt = self.cached_output[:batch_size]
-        last_txt = self.cached_output[batch_size:2*batch_size]
-        last_uncond = self.cached_output[2*batch_size:]
+        x = self.cached_output - self.cached_output[:batch_single] + x
+
         if self.need_cache_output[self.step]:
-            self.cached_output[:batch_size] = x
-            self.cached_output[batch_size:2*batch_size] = x + last_txt - last_spktxt
-            self.cached_output[2*batch_size:] = x + last_uncond - last_spktxt
-            x = self.cached_output
-        else:
-            x = torch.cat([x, x + last_txt - last_spktxt, x + last_uncond - last_spktxt], dim=0)
-    
-    if 'NONE' in method and self.need_cache_output[self.step]:
-        self.cached_output = x
-    
-    self.step += 1
+            self.cached_output = x
+
+    else:
         
+        # Normal attention calculation
+        query = self.wq(x)
+        key = self.wk(x)
+        value = self.wv(x)
+        
+        batch_size, seq_len, _ = x.shape
+        
+        # attention
+        query = query.view(batch_size, -1, self.n_local_heads, self.head_dim)
+        key = key.view(batch_size, -1, self.n_local_kv_heads, self.head_dim)
+        value = value.view(batch_size, -1, self.n_local_kv_heads, self.head_dim)
+        query, key = apply_rotary_emb(query, key, freqs_cis=freqs_cis)
+        
+        output = flash_attn_func(query, key, value, causal=False)
+        
+        output = output.view(batch_size, seq_len, -1)
+        x = output.to(query.dtype)
+        x = self.wo(x)
+        
+        if self.need_cache_output[self.step]:
+            self.cached_output = x
+    self.step += 1
     return x
 
 def cuda_timer(func):

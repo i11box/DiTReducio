@@ -5,16 +5,16 @@ import torch
 
 def threshold_q(data, ratio=0.5):
     """
-    top q% threshold
-    
+    Calculate threshold using the percentile method.
+
     Args:
-        data (numpy.ndarray):
-        ratio (float)
-        
+        data (numpy.ndarray): Input data array
+        ratio (float): The proportion of data points that should be below the threshold
+
     Returns:
-        float: threshold value
+        float: The calculated threshold value
     """
-    return float(np.percentile(data, (1-ratio) * 100))
+    return float(np.percentile(data, (1 - ratio) * 100))
 
 def seed_everything(seed=0):
     random.seed(seed)

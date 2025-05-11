@@ -1,8 +1,9 @@
+# code from https://github.com/SWivid/F5-TTS
 import math
 import os
 import random
 import string
-import logging
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -13,15 +14,30 @@ from f5_tts.eval.ecapa_tdnn import ECAPA_TDNN_SMALL
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import convert_char_to_pinyin
 
-def ensure_dir(dir_path):
-    """Ensure that the directory exists, creating it if necessary."""
-    os.makedirs(dir_path, exist_ok=True)
+
+# seedtts testset metainfo: utt, prompt_text, prompt_wav, gt_text, gt_wav
+def get_seedtts_testset_metainfo(metalst):
+    f = open(metalst)
+    lines = f.readlines()
+    f.close()
+    metainfo = []
+    for line in lines:
+        if len(line.strip().split("|")) == 5:
+            utt, prompt_text, prompt_wav, gt_text, gt_wav = line.strip().split("|")
+        elif len(line.strip().split("|")) == 4:
+            utt, prompt_text, prompt_wav, gt_text = line.strip().split("|")
+            gt_wav = os.path.join(os.path.dirname(metalst), "wavs", utt + ".wav")
+        if not os.path.isabs(prompt_wav):
+            prompt_wav = os.path.join(os.path.dirname(metalst), prompt_wav)
+        metainfo.append((utt, prompt_text, prompt_wav, gt_text, gt_wav))
+    return metainfo
 
 
 # librispeech test-clean metainfo: gen_utt, ref_txt, ref_wav, gen_txt, gen_wav
 def get_librispeech_test_clean_metainfo(metalst, librispeech_test_clean_path):
-    with open(metalst) as f:
-        lines = f.readlines()
+    f = open(metalst)
+    lines = f.readlines()
+    f.close()
     metainfo = []
     for line in lines:
         ref_utt, ref_dur, ref_txt, gen_utt, gen_dur, gen_txt = line.strip().split("\t")
@@ -133,9 +149,9 @@ def get_inference_prompt(
 
         # deal with batch
         assert infer_batch_size > 0, "infer_batch_size should be greater than 0."
-        assert (
-            min_tokens <= total_mel_len <= max_tokens
-        ), f"Audio {utt} has duration {total_mel_len*hop_length//target_sample_rate}s out of range [{min_secs}, {max_secs}]."
+        assert min_tokens <= total_mel_len <= max_tokens, (
+            f"Audio {utt} has duration {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]."
+        )
         bucket_i = math.floor((total_mel_len - min_tokens) / (max_tokens - min_tokens + 1) * num_buckets)
 
         utts[bucket_i].append(utt)
@@ -189,6 +205,42 @@ def get_inference_prompt(
     return prompts_all
 
 
+# get wav_res_ref_text of seed-tts test metalst
+# https://github.com/BytedanceSpeech/seed-tts-eval
+
+
+def get_seed_tts_test(metalst, gen_wav_dir, gpus):
+    f = open(metalst)
+    lines = f.readlines()
+    f.close()
+
+    test_set_ = []
+    for line in tqdm(lines):
+        if len(line.strip().split("|")) == 5:
+            utt, prompt_text, prompt_wav, gt_text, gt_wav = line.strip().split("|")
+        elif len(line.strip().split("|")) == 4:
+            utt, prompt_text, prompt_wav, gt_text = line.strip().split("|")
+
+        if not os.path.exists(os.path.join(gen_wav_dir, utt + ".wav")):
+            continue
+        gen_wav = os.path.join(gen_wav_dir, utt + ".wav")
+        if not os.path.isabs(prompt_wav):
+            prompt_wav = os.path.join(os.path.dirname(metalst), prompt_wav)
+
+        test_set_.append((gen_wav, prompt_wav, gt_text))
+
+    num_jobs = len(gpus)
+    if num_jobs == 1:
+        return [(gpus[0], test_set_)]
+
+    wav_per_job = len(test_set_) // num_jobs + 1
+    test_set = []
+    for i in range(num_jobs):
+        test_set.append((gpus[i], test_set_[i * wav_per_job : (i + 1) * wav_per_job]))
+
+    return test_set
+
+
 # get librispeech test-clean cross sentence test
 
 
@@ -211,8 +263,6 @@ def get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path
 
         ref_spk_id, ref_chaptr_id, _ = ref_utt.split("-")
         ref_wav = os.path.join(librispeech_test_clean_path, ref_spk_id, ref_chaptr_id, ref_utt + ".flac")
-        # gen_spk_id, gen_chaptr_id, _ = gen_utt.split("-")
-        # ref_wav = os.path.join(librispeech_test_clean_path, gen_spk_id, gen_chaptr_id, gen_utt + ".flac")
 
         test_set_.append((gen_wav, ref_wav, gen_txt))
 
@@ -272,12 +322,11 @@ def run_asr_wer(args):
     from zhon.hanzi import punctuation
 
     punctuation_all = punctuation + string.punctuation
-    wers = []
+    wer_results = []
 
     from jiwer import compute_measures
 
-    index = 1
-    for gen_wav, prompt_wav, truth in test_set:
+    for gen_wav, prompt_wav, truth in tqdm(test_set):
         if lang == "zh":
             res = asr_model.generate(input=gen_wav, batch_size_s=300, disable_pbar=True)
             hypo = res[0]["text"]
@@ -288,8 +337,8 @@ def run_asr_wer(args):
             for segment in segments:
                 hypo = hypo + " " + segment.text
 
-        # raw_truth = truth
-        # raw_hypo = hypo
+        raw_truth = truth
+        raw_hypo = hypo
 
         for x in punctuation_all:
             truth = truth.replace(x, "")
@@ -313,21 +362,16 @@ def run_asr_wer(args):
         # dele = measures["deletions"] / len(ref_list)
         # inse = measures["insertions"] / len(ref_list)
 
-        wers.append(wer)
-        print(f"{index}/{len(test_set)}: {wer}")
+        wer_results.append(wer)
 
-        index += 1
-    
-    print(f'本批WER: {round(np.mean(wers) * 100, 3)}')
+    return wer_results
 
-    return wers
 
 # SIM Evaluation
 
 
 def run_sim(args):
     rank, test_set, ckpt_dir = args
-    logger = logging.getLogger("eval")
     device = f"cuda:{rank}"
 
     model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type="wavlm_large", config_path=None)
@@ -339,11 +383,10 @@ def run_sim(args):
         model = model.cuda(device)
     model.eval()
 
-    sim_list = []
-    i = 0
-    for wav1, wav2, truth in test_set:
-        wav1, sr1 = torchaudio.load(wav1)
-        wav2, sr2 = torchaudio.load(wav2)
+    sim_results = []
+    for gen_wav, prompt_wav, truth in tqdm(test_set):
+        wav1, sr1 = torchaudio.load(gen_wav)
+        wav2, sr2 = torchaudio.load(prompt_wav)
 
         resample1 = torchaudio.transforms.Resample(orig_freq=sr1, new_freq=16000)
         resample2 = torchaudio.transforms.Resample(orig_freq=sr2, new_freq=16000)
@@ -359,10 +402,11 @@ def run_sim(args):
 
         sim = F.cosine_similarity(emb1, emb2)[0].item()
         # print(f"VSim score between two audios: {sim:.4f} (-1.0, 1.0).")
-        logger.info(f"{i}/{len(test_set)}: {sim:.4f}")
-        sim_list.append(sim)
-        i += 1
+        sim_results.append(
+            {
+                "wav": Path(gen_wav).stem,
+                "sim": sim,
+            }
+        )
 
-    sim = round(sum(sim_list) / len(sim_list), 3)
-    print(f'本批SIM: {sim}')
-    return sim_list
+    return sim_results
