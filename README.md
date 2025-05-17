@@ -1,5 +1,7 @@
 # TriCAL 
-A calibration and acceleration tool for TTS models.
+A calibration and acceleration tool for DiT-Based TTS models.
+
+Audio demos for different thresholds are available in the `assets` folder.
 ## Supported Models
 - F5-TTS
 - MegaTTS 3
@@ -19,19 +21,8 @@ git clone https://github.com/i11box/TriCAL.git # clone the repository
 > Note: The paths in code should be adjusted according to your environment.
 
 ## Usage
-Launch
 ```bash
-python fast_cli.py
-```
-
-### Calibration Mode
-```bash
-python fast_cli.py -q true -d <threshold>
-```
-- `-q true`: Enable calibration
-- `-d`: Set threshold value
-
-### Acceleration Mode
-```bash
-python fast_cli.py -d <threshold> # after calibration
+python fast_cli.py # Launch
+python fast_cli.py -q true -d <threshold> # Calibration, -q true enable calibration, -d <threshold> set threshold value
+python fast_cli.py -d <threshold> # Acceleration
 ```
