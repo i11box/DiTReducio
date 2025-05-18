@@ -1,4 +1,4 @@
-# TriCAL 
+# DiTReducio 
 A calibration and acceleration tool for DiT-Based TTS models.
 
 Audio demos for different thresholds are available in the `assets` folder.
@@ -8,7 +8,7 @@ Audio demos for different thresholds are available in the `assets` folder.
 
 ## Installation
 ```bash
-git clone https://github.com/i11box/TriCAL.git # clone the repository
+git clone https://github.com/i11box/DiTReducio.git # clone the repository
 ```
 
 - F5-TTS
